@@ -30,7 +30,7 @@ class PSAndJStackMerger():
   
     # Sort and trim.
     output = sorted(output, 
-        key=lambda row: row['%cpu'],
+        key=lambda row: float(row['%cpu']),
         reverse=True)
     output = filter(lambda row: row['comm'] == "java", output)
     if limit != None:
