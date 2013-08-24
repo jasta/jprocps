@@ -7,11 +7,13 @@ so that they can be further scrutinized in jconsole.
 """
 
 import sys
+import curses
+from select import select
 from argparse import ArgumentParser
-from time import sleep
+from time import sleep, time
 from re import search
 from subprocess import Popen, PIPE
-from itertools import groupby
+from itertools import groupby, repeat
 
 class PSAndJStackMerger():
 
@@ -54,7 +56,9 @@ class PSAndJStackMerger():
 
     exitcode = jstack.wait()
     if exitcode != 0:
-      raise Exception("jstack returned with exit code: %d" % (exitcode))
+      # This isn't necessarily an error because it may be a race
+      # condition between invoking ps and jstack.
+      pass
 
     return names
   
@@ -91,7 +95,7 @@ class Options:
         description='top for Java threads')
     parser.add_argument('-b', '--batch', action='store_true',
         help='Run in batch mode (see top)')
-    parser.add_argument('-d', '--delay', metavar='N', type=int,
+    parser.add_argument('-d', '--delay', metavar='N', type=float,
         default=2,
         help='Sleep <N> seconds between runs')
     args = parser.parse_args(self._argv[1:])
@@ -102,9 +106,24 @@ class JTop:
 
   def __init__(self):
     self.merger = PSAndJStackMerger()
+    self.done = False
+    self.dirty_screen = False
 
-  def print_ps(self, ps):
-    fmt = '%5s %5s %-10s %-5s %-5s %s'
+  def print_ps(self, ps, suffix=None, maxwidth=None):
+
+    basefmt = '%5s %5s %-10s %-5s %-5s '
+    basefmtwidth = len(basefmt % (tuple(repeat('', 5))))
+    if maxwidth != None:
+      # TODO: Should try to handle very small terminal windows...
+      remaining = maxwidth - basefmtwidth
+      if remaining <= 0:
+        raise Exception("Very small terminals not supported")
+      thread_name_fmt = '%-' + str(remaining) + 's'
+    else:
+      thread_name_fmt = '%s'
+    fmt = basefmt + thread_name_fmt
+    if suffix != None:
+      fmt = fmt + suffix
     print fmt % ('PID', 'TID', 'USER', '%CPU', '%MEM', 'THREAD')
     columns = ('pid', 'tid', 'euser', '%cpu', '%mem', 'thread_name')
     for proc in ps:
@@ -113,16 +132,59 @@ class JTop:
   def run_once(self):
     self.print_ps(self.merger.list_threads())
 
-  def _clear_screen(self):
-    print chr(27) + '[2J'
+  def _mark_dirty(self):
+    self.dirty_screen = True
+
+  def _mark_clean(self):
+    self.dirty_screen = False
+
+  def _process_input(self, ch):
+    if ch in range(256):
+      cch = chr(ch)
+      if cch == 'q' or cch == 'Q':
+        self.done = True
+        self._mark_dirty()
+
+  def _sleep_and_process_input(self, screen):
+    delay = self.options.delay
+    while delay > 0:
+      start = time()
+      (read_ready, write_ready, err_ready) = select([sys.stdin], [], [], delay)
+      elapsed = time() - start
+      delay -= elapsed
+      if read_ready:
+        self._process_input(screen.getch())
+        if self.dirty_screen:
+          break
+      else:
+        break
 
   def run_continuously(self):
-    limit = 10 # TODO: make this work like actual top
-    while True:
-      ps = self.merger.list_threads(limit)
-      self._clear_screen()
-      self.print_ps(ps)
-      sleep(self.options.delay)
+    # Disclaimer: I have no idea what I'm doing when it comes to ncurses.
+    # Absolute black magic hackery here based on my light read of procps'
+    # top implementation.
+    def runner(screen):
+      curses.use_default_colors()
+      first_run = True
+      while not self.done:
+        (maxy, maxx) = screen.getmaxyx()
+        ps = self.merger.list_threads(maxy - 2)
+        self.last_ps = ps
+        # Weird little hack seems to be needed on the first draw pass else
+        # it will not take effect.  Draw twice on first run.
+        for x in range(2 if first_run else 1):
+          self.print_ps(ps, '\r', maxx)
+          screen.refresh()
+        self._mark_clean()
+        first_run = False
+        self._sleep_and_process_input(screen)
+    curses.wrapper(runner)
+
+    # Lame hack to put the last output on screen after 'q' is hit.
+    # curses.wrapper is presumed to be clearing the screen on exit, which
+    # we definitely don't want.
+    if self.last_ps != None:
+      self.print_ps(self.last_ps)
 
   def run(self, argv):
     try:
