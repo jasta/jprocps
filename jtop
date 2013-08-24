@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+"""
+
+Simple script to decorate top-like output with Java thread names
+so that they can be further scrutinized in jconsole.
+
+"""
+
+from time import sleep
+from re import search
+from subprocess import Popen, PIPE
+from itertools import groupby
+
+class JTop:
+
+  """Return a CPU-sorted list of Java tids."""
+  def _invoke_ps(self, limit = None):
+    columns = ('pid', 'tid', 'euser', '%cpu', '%mem', 'comm')
+    ps = Popen(['ps', '-eL', '-o', ",".join(columns)], stdout=PIPE)
+  
+    # Burn the first line which has the header section in it.
+    ps.stdout.readline()
+    output = map(lambda row: dict(zip(columns, row.split(None))), ps.stdout)
+  
+    exitcode = ps.wait()
+    if exitcode != 0:
+      raise Exception("ps returned with exit code: %d" % (exitcode))
+  
+    # Sort and trim.
+    output = sorted(output, 
+        key=lambda row: row['%cpu'],
+        reverse=True)
+    output = filter(lambda row: row['comm'] == "java", output)
+    if limit != None:
+      return output[0:limit]
+    else:
+      return output
+  
+  """Return a dict of tid to thread name."""
+  def _get_thread_names(self, pid):
+    jstack = Popen(['jstack', pid], stdout=PIPE)
+    
+    names = dict()
+    for line in jstack.stdout:
+      # jstack calls them nids and uses tid for a Java-specific concept
+      # (unrelated to what ps calls a tid)
+      match = search('^\"(.*?)\" .*nid=(0x[a-f0-9]+)', line)
+      if match:
+        thread_name = match.group(1)
+        tid = int(match.group(2), 0)
+        names[tid] = thread_name
+
+    exitcode = jstack.wait()
+    if exitcode != 0:
+      raise Exception("jstack returned with exit code: %d" % (exitcode))
+
+    return names
+  
+  """Add thread_name to a list of ps entries (and return those entries)."""
+  def _decorate_ps_with_thread_name(self, ps):
+
+    by_pid_func = lambda row: row['pid']
+    ps_by_pid = sorted(ps, key=by_pid_func)
+    for pid, tid_rows in groupby(ps_by_pid, key=by_pid_func):
+      names = self._get_thread_names(pid)
+      for tid_row in tid_rows:
+        tid = int(tid_row['tid'])
+        thread_name = None
+        if int(pid) == tid:
+          thread_name = '<main>'
+        elif tid in names:
+          thread_name = names[tid]
+        else:
+          thread_name = '???'
+        tid_row['thread_name'] = thread_name
+
+    return ps
+
+  def run_once(self, limit=None):
+    ps = self._decorate_ps_with_thread_name(self._invoke_ps(limit))
+    fmt = '%5s %5s %-10s %-5s %-5s %s'
+    print fmt % ('PID', 'TID', 'USER', '%CPU', '%MEM', 'THREAD')
+    columns = ('pid', 'tid', 'euser', '%cpu', '%mem', 'thread_name')
+    for proc in ps:
+      print fmt % (tuple(map(lambda key: proc[key], columns)))
+
+  def _clear_screen(self):
+    print chr(27) + '[2J'
+
+  def run_continuously(self):
+    while True:
+      self._clear_screen()
+      self.run_once(10)
+      sleep(2)
+
+topRunner = JTop()
+topRunner.run_continuously()
