@@ -6,15 +6,17 @@ so that they can be further scrutinized in jconsole.
 
 """
 
+import sys
+from argparse import ArgumentParser
 from time import sleep
 from re import search
 from subprocess import Popen, PIPE
 from itertools import groupby
 
-class JTop:
+class PSAndJStackMerger():
 
   """Return a CPU-sorted list of Java tids."""
-  def _invoke_ps(self, limit = None):
+  def _invoke_ps(self, limit=None):
     columns = ('pid', 'tid', 'euser', '%cpu', '%mem', 'comm')
     ps = Popen(['ps', '-eL', '-o', ",".join(columns)], stdout=PIPE)
   
@@ -76,22 +78,71 @@ class JTop:
 
     return ps
 
-  def run_once(self, limit=None):
-    ps = self._decorate_ps_with_thread_name(self._invoke_ps(limit))
+  def list_threads(self, limit=None):
+    return self._decorate_ps_with_thread_name(self._invoke_ps(limit))
+
+class Options:
+
+  def __init__(self, argv):
+    self._argv = argv
+
+  def parse(self):
+    parser = ArgumentParser(prog=self._argv[0],
+        description='top for Java threads')
+    parser.add_argument('-b', '--batch', action='store_true',
+        help='Run in batch mode (see top)')
+    parser.add_argument('-d', '--delay', metavar='N', type=int,
+        default=2,
+        help='Sleep <N> seconds between runs')
+    args = parser.parse_args(self._argv[1:])
+    self.batch = args.batch
+    self.delay = args.delay
+
+class JTop:
+
+  def __init__(self):
+    self.merger = PSAndJStackMerger()
+
+  def print_ps(self, ps):
     fmt = '%5s %5s %-10s %-5s %-5s %s'
     print fmt % ('PID', 'TID', 'USER', '%CPU', '%MEM', 'THREAD')
     columns = ('pid', 'tid', 'euser', '%cpu', '%mem', 'thread_name')
     for proc in ps:
       print fmt % (tuple(map(lambda key: proc[key], columns)))
 
+  def run_once(self):
+    self.print_ps(self.merger.list_threads())
+
   def _clear_screen(self):
     print chr(27) + '[2J'
 
   def run_continuously(self):
+    limit = 10 # TODO: make this work like actual top
     while True:
+      ps = self.merger.list_threads(limit)
       self._clear_screen()
-      self.run_once(10)
-      sleep(2)
+      self.print_ps(ps)
+      sleep(self.options.delay)
+
+  def run(self, argv):
+    try:
+      self._run(argv)
+
+      # Work around: http://www.velocityreviews.com/forums/t749747-help-with-a-piping-error.html
+      sys.stdout.flush()
+    except KeyboardInterrupt:
+      sys.exit(130)
+    except (IOError, OSError):
+      sys.exit(141)
+
+  def _run(self, argv):
+    self.options = Options(argv)
+    self.options.parse()
+    if self.options.batch:
+      self.run_once()
+    else:
+      self.run_continuously()
+
 
 topRunner = JTop()
-topRunner.run_continuously()
+topRunner.run(sys.argv)
