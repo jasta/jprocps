@@ -12,6 +12,8 @@ what to look for when troubleshooting very large or complex multi-threaded Java
 applications using jconsole or a traditional debugger.  Looking at you,
 IntelliJ.
 
+jtop works by simply combining ps and jstack and providing a similar UI to top.
+
 Sample Output
 -------------
 
