@@ -8,6 +8,7 @@ so that they can be further scrutinized in jconsole.
 
 import sys
 import curses
+import os
 from select import select
 from argparse import ArgumentParser
 from time import sleep, time
@@ -15,23 +16,36 @@ from re import search
 from subprocess import Popen, PIPE
 from itertools import groupby, repeat
 
-class PSAndJStackMerger():
+class TopRunner():
 
-  """Return a CPU-sorted list of Java tids."""
-  def _invoke_ps(self, limit=None):
-    columns = ('pid', 'tid', 'euser', '%cpu', '%mem', 'comm')
-    ps = Popen(['ps', '-eL', '-o', ",".join(columns)], stdout=PIPE)
-  
-    # Burn the first line which has the header section in it.
-    ps.stdout.readline()
-    output = map(lambda row: dict(zip(columns, row.split(None))), ps.stdout)
-  
-    exitcode = ps.wait()
+  def __init__(self):
+    # Map of expected text in the columns to the actual dict layout that we
+    # desire.
+    self.columns = {
+      'PID': 'tid',
+      'USER': 'euser',
+      '%CPU': '%cpu',
+      '%MEM': '%mem',
+      'COMMAND': 'comm'
+    }
+
+  """Return a decorated, CPU-sorted list of Java tids."""
+  def invoke_top(self, limit=None):
+    c_locale_env = os.environ.copy()
+    c_locale_env['LC_ALL'] = 'C'
+    top = Popen(['top', '-H', '-b', '-n', '1'], stdout=PIPE, env=c_locale_env)
+
+    expected_cols = self.columns.keys()
+    header_layout = self._skip_header(top.stdout, expected_cols)
+    output = map(lambda line: self._parse_top_line(line, header_layout),
+        top.stdout)
+
+    exitcode = top.wait()
     if exitcode != 0:
-      raise Exception("ps returned with exit code: %d" % (exitcode))
-  
+      raise Exception("top returned with exit code: %d" % (exitcode))
+
     # Sort and trim.
-    output = sorted(output, 
+    output = sorted(output,
         key=lambda row: float(row['%cpu']),
         reverse=True)
     output = filter(lambda row: row['comm'] == "java", output)
@@ -39,15 +53,54 @@ class PSAndJStackMerger():
       return output[0:limit]
     else:
       return output
-  
+
+  """Read the provided input until the top column header line is read.
+
+  Returns the header layout or raises an exception if the header line is not
+  encountered.
+
+  """
+  def _skip_header(self, topin, expected_headers):
+    while True:
+      line = topin.readline()
+      row = line.split(None)
+      row_expected = filter(lambda col: col in expected_headers, row)
+      if len(row_expected) == len(expected_headers):
+        return row
+    raise Exception("Could not find top header row, expected: %s" %
+        (join(' ', expected_headers)))
+
+  def _parse_top_line(self, line, header_layout):
+    untidied_row = dict(zip(header_layout, line.split(None)))
+    tidied_row = {}
+    for untidy_key, untidy_value in untidied_row.iteritems():
+      if untidy_key in self.columns.iterkeys():
+        tidied_row[self.columns[untidy_key]] = untidy_value
+    tidied_row['pid'] = self._get_pid_from_tid(tidied_row['tid'])
+    return tidied_row
+
+  def _get_pid_from_tid(self, tid):
+    status_file = '/proc/%d/status' % (int(tid))
+    f = open(status_file)
+    try:
+      for line in f:
+        row = line.split(None)
+        if row[0] == 'Tgid:':
+          return row[1]
+      raise Exception("Failed to determine pid from %s" % (status_file))
+    finally:
+      f.close()
+
+class PSAndJStackMerger():
+
   """Return a dict of tid to thread name."""
   def _get_thread_names(self, pid):
     jstack = Popen(['jstack', pid], stdout=PIPE)
-    
+
     names = dict()
     for line in jstack.stdout:
       # jstack calls them nids and uses tid for a Java-specific concept
-      # (unrelated to what ps calls a tid)
+      # (unrelated to what top calls a pid/tid)
       match = search('^\"(.*?)\" .*nid=(0x[a-f0-9]+)', line)
       if match:
         thread_name = match.group(1)
@@ -61,7 +114,7 @@ class PSAndJStackMerger():
       pass
 
     return names
-  
+
   """Add thread_name to a list of ps entries (and return those entries)."""
   def _decorate_ps_with_thread_name(self, ps):
 
@@ -83,7 +136,8 @@ class PSAndJStackMerger():
     return ps
 
   def list_threads(self, limit=None):
-    return self._decorate_ps_with_thread_name(self._invoke_ps(limit))
+    top_output = TopRunner().invoke_top(limit)
+    return self._decorate_ps_with_thread_name(top_output)
 
 class Options:
 
